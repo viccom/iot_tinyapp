@@ -4,28 +4,67 @@ import (
 	"encoding/json"
 	"fmt"
 	mqtt "github.com/eclipse/paho.mqtt.golang"
+	"io/ioutil"
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/BurntSushi/toml"
 	"github.com/huskar-t/opcda"
 	"github.com/huskar-t/opcda/com"
+	"github.com/pkg/errors"
 )
 
-const (
-	opcdaHost      = "localhost"
-	opcdaprogID    = "Matrikon.OPC.Simulation.1"
-	mqttBroker     = "mqbroker.metme.top"
-	mqttPort       = 1883
-	mqttID         = "mqttgo_client_id"
-	mqttUsername   = "mqdevice"
-	mqttPassword   = "device@metme"
-	mqttTopic      = "7486E23133A9/Matrikon.OPC.Simulation.1"
-	reconnectDelay = 5 * time.Second // 重连间隔时间
-)
+type Config struct {
+	Opcda struct {
+		Host   string
+		ProgID string
+	}
+	Mqtt struct {
+		Broker   string
+		Port     int
+		ID       string
+		Username string
+		Password string
+		Topic    string
+	}
+	Reconnect struct {
+		Delay time.Duration
+	}
+}
+
+var config Config
+
+func loadConfig(configFile string) error {
+	_, err := toml.DecodeFile(configFile, &config)
+	if err != nil {
+		return errors.Wrap(err, "failed to decode config file")
+	}
+	return nil
+}
+
+func readTagsFromCSV(filePath string) ([]string, error) {
+	content, err := ioutil.ReadFile(filePath)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to read CSV file")
+	}
+
+	tags := make([]string, 0)
+	lines := strings.Split(string(content), "\n")
+	for _, line := range lines {
+		if line != "" {
+			tags = append(tags, line)
+		}
+	}
+
+	return tags, nil
+}
+
+// 从配置文件中读取
 
 // 定义一个数据队列
 type DataQueue struct {
@@ -64,21 +103,11 @@ type PUBData struct {
 }
 
 // 读取OPCDA数据的函数
-func readOPCDAData() {
+func readOPCDAData(config Config, tags []string) {
 	com.Initialize()
 	defer com.Uninitialize()
-	host := opcdaHost
-	progID := opcdaprogID
-	tags := []string{
-		"Random.Real4",
-		"Random.Real8",
-		"Random.String",
-		"Random.Time",
-		"Random.UInt1",
-		"Random.UInt2",
-		"Random.UInt4",
-		"Random.UInt8",
-	}
+	host := config.Opcda.Host
+	progID := config.Opcda.ProgID
 	server, err := opcda.Connect(progID, host)
 	if err != nil {
 		log.Fatalf("connect to opc server failed: %s\n", err)
@@ -162,13 +191,13 @@ var f mqtt.MessageHandler = func(client mqtt.Client, msg mqtt.Message) {
 	fmt.Printf("MSG: %s\n", msg.Payload())
 }
 
-func publishMQTTData() {
+func publishMQTTData(config Config) {
 	log.Println("Starting publishMQTTData")
 	opts := mqtt.NewClientOptions()
-	opts.AddBroker(fmt.Sprintf("tcp://%s:%d", mqttBroker, mqttPort))
-	opts.SetClientID(mqttID)
-	opts.SetUsername(mqttUsername)
-	opts.SetPassword(mqttPassword)
+	opts.AddBroker(fmt.Sprintf("tcp://%s:%d", config.Mqtt.Broker, config.Mqtt.Port))
+	opts.SetClientID(config.Mqtt.ID)
+	opts.SetUsername(config.Mqtt.Username)
+	opts.SetPassword(config.Mqtt.Password)
 	opts.SetDefaultPublishHandler(f)
 
 	client := mqtt.NewClient(opts)
@@ -190,7 +219,7 @@ func publishMQTTData() {
 						break
 					}
 					fmt.Printf("Failed to connect to MQTT broker. Retrying... Error: %v\n", token.Error())
-					time.Sleep(reconnectDelay)
+					time.Sleep(config.Reconnect.Delay)
 					if _, ok := <-stopChan; ok {
 						client.Disconnect(250)
 						return
@@ -201,7 +230,7 @@ func publishMQTTData() {
 
 			if data, ok := dataQueue.Dequeue(); ok {
 				fmt.Printf("Publishing data to MQTT: %s\n", data)
-				token := client.Publish(mqttTopic, 0, false, data)
+				token := client.Publish(config.Mqtt.Topic, 0, false, data)
 				if token.Wait() && token.Error() != nil {
 					log.Printf("Error publishing to MQTT: %v\n", token.Error())
 				} else {
@@ -215,18 +244,37 @@ func publishMQTTData() {
 
 func main() {
 	var wg sync.WaitGroup
-	wg.Add(2)
 
-	// 启动OPCDA读取线程
+	// 加载配置文件
+	err := loadConfig("E:\\Go_Codes\\data_pullandpush_go\\opcda2mq\\config.toml")
+	if err != nil {
+		log.Fatalf("failed to load config: %v", err)
+	}
+
+	// 读取 tags 从 CSV 文件
+	tags, err := readTagsFromCSV("E:\\Go_Codes\\data_pullandpush_go\\opcda2mq\\opcdatags.csv")
+	if err != nil {
+		log.Fatalf("failed to read tags from CSV: %v", err)
+	}
+
+	// 启动多个 readOPCDAData 线程
 	go func() {
 		defer wg.Done()
-		readOPCDAData()
+		readOPCDAData(config, tags)
 	}()
+	//numThreads := 2 // 你可以根据需要调整线程数量
+	//for i := 0; i < numThreads; i++ {
+	//	wg.Add(1)
+	//	go func() {
+	//		defer wg.Done()
+	//		readOPCDAData()
+	//	}()
+	//}
 
 	// 启动MQTT发布线程
 	go func() {
 		defer wg.Done()
-		publishMQTTData()
+		publishMQTTData(config)
 	}()
 
 	// 等待子线程启动
