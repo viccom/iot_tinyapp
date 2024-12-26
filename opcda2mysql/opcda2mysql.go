@@ -1,9 +1,9 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
-	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"io/ioutil"
 	"log"
 	"os"
@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+	_ "github.com/go-sql-driver/mysql"
 	"github.com/huskar-t/opcda"
 	"github.com/huskar-t/opcda/com"
 	"github.com/pkg/errors"
@@ -24,13 +25,12 @@ type Config struct {
 		Host   string
 		ProgID string
 	}
-	Mqtt struct {
-		Broker   string
+	Mysql struct {
+		Host     string
 		Port     int
 		ID       string
 		Username string
 		Password string
-		Topic    string
 	}
 	Reconnect struct {
 		Delay time.Duration
@@ -39,6 +39,7 @@ type Config struct {
 
 var config Config
 
+// 从配置文件中读取
 func loadConfig(configFile string) error {
 	_, err := toml.DecodeFile(configFile, &config)
 	if err != nil {
@@ -63,8 +64,6 @@ func readTagsFromCSV(filePath string) ([]string, error) {
 
 	return tags, nil
 }
-
-// 从配置文件中读取
 
 // 定义一个数据队列
 type DataQueue struct {
@@ -185,59 +184,98 @@ func readOPCDAData(config Config, tags []string) {
 
 }
 
-// 发布MQTT数据的函数
-var f mqtt.MessageHandler = func(client mqtt.Client, msg mqtt.Message) {
-	fmt.Printf("TOPIC: %s\n", msg.Topic())
-	fmt.Printf("MSG: %s\n", msg.Payload())
-}
+// 初始化数据库连接
+//func initDB(config Config) (*sql.DB, error) {
+//	fmt.Printf("username: %s, Password: %s, Host: %s, port: %d, id:%s\n", config.Mysql.Username, config.Mysql.Password, config.Mysql.Host, config.Mysql.Port, config.Mysql.ID)
+//	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s", config.Mysql.Username, config.Mysql.Password, config.Mysql.Host, config.Mysql.Port, config.Mysql.ID)
+//	db, err := sql.Open("mysql", dsn)
+//	if err != nil {
+//		return nil, errors.Wrap(err, "failed to open database")
+//	}
+//	return db, nil
+//}
 
-func publishMQTTData(config Config) {
-	log.Println("Starting publishMQTTData")
-	opts := mqtt.NewClientOptions()
-	opts.AddBroker(fmt.Sprintf("tcp://%s:%d", config.Mqtt.Broker, config.Mqtt.Port))
-	opts.SetClientID(config.Mqtt.ID)
-	opts.SetUsername(config.Mqtt.Username)
-	opts.SetPassword(config.Mqtt.Password)
-	opts.SetDefaultPublishHandler(f)
+// 创建数据库和表
+//func createDatabaseAndTable(db *sql.DB) error {
+//	_, err := db.Exec("CREATE DATABASE IF NOT EXISTS opcda")
+//	if err != nil {
+//		return errors.Wrap(err, "failed to create database")
+//	}
+//	_, err = db.Exec("USE opcda")
+//	if err != nil {
+//		return errors.Wrap(err, "failed to use database")
+//	}
+//	_, err = db.Exec("CREATE TABLE IF NOT EXISTS data (id INT AUTO_INCREMENT PRIMARY KEY, tag_id VARCHAR(255), timestamp DATETIME, quality INT, value VARCHAR(255))")
+//	if err != nil {
+//		return errors.Wrap(err, "failed to create table")
+//	}
+//	return nil
+//}
 
-	client := mqtt.NewClient(opts)
+// 从队列读取数据写入MySQL的函数
+func writeMySQLData(config Config) {
+	// 连接数据库
+	fmt.Printf("username: %s, Password: %s, Host: %s, port: %d, id:%s\n", config.Mysql.Username, config.Mysql.Password, config.Mysql.Host, config.Mysql.Port, config.Mysql.ID)
+	db, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s:%d)/", config.Mysql.Username, config.Mysql.Password, config.Mysql.Host, config.Mysql.Port))
+	if err != nil {
+		log.Printf("failed to connect to database: %v", err)
+		return
+	}
+	defer db.Close()
+
+	// 创建数据库
+	_, err = db.Exec(fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s", config.Mysql.ID))
+	if err != nil {
+		log.Printf("failed to create database: %v", err)
+		return
+	}
+
+	// 选择数据库
+	_, err = db.Exec(fmt.Sprintf("USE %s", config.Mysql.ID))
+	if err != nil {
+		log.Printf("failed to select database: %v", err)
+		return
+	}
+
+	// 创建表
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS opcdata (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        tag_id VARCHAR(255) NOT NULL,
+        data_timestamp DATETIME NOT NULL,
+        data_quality TINYINT NOT NULL,
+        value VARCHAR(255) NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )`)
+	if err != nil {
+		log.Printf("failed to create table: %v", err)
+		return
+	}
+
+	// 从队列中读取数据并写入数据库
 	for {
 		select {
 		case <-stopChan:
-			log.Println("Received stop signal in publishMQTTData goroutine. Disconnecting MQTT client.")
-			client.Disconnect(250)
-			log.Println("Exiting publishMQTTData goroutine.")
+			log.Println("Received stop signal. Exiting writeMySQLData goroutine.")
 			return
 		default:
-			// 检查MQTT连接状态，如果未连接则尝试连接
-			if !client.IsConnected() {
-				for {
-					log.Println("Attempting to connect to MQTT broker...")
-					token := client.Connect()
-					if token.Wait() && token.Error() == nil {
-						log.Println("Connected to MQTT broker")
-						break
-					}
-					fmt.Printf("Failed to connect to MQTT broker. Retrying... Error: %v\n", token.Error())
-					time.Sleep(config.Reconnect.Delay)
-					if _, ok := <-stopChan; ok {
-						client.Disconnect(250)
-						return
-					}
-
-				}
+			data, ok := dataQueue.Dequeue()
+			if !ok {
+				time.Sleep(100 * time.Millisecond)
+				continue
 			}
-
-			if data, ok := dataQueue.Dequeue(); ok {
-				fmt.Printf("Publishing data to MQTT: %s\n", data)
-				token := client.Publish(config.Mqtt.Topic, 0, false, data)
-				if token.Wait() && token.Error() != nil {
-					log.Printf("Error publishing to MQTT: %v\n", token.Error())
-				} else {
-					fmt.Printf("Successfully published data to MQTT: %s\n", data)
-				}
+			// 解析JSON数据
+			var pubData PUBData
+			err := json.Unmarshal([]byte(data), &pubData)
+			if err != nil {
+				log.Printf("failed to unmarshal JSON: %v", err)
+				continue
 			}
-			time.Sleep(1 * time.Second)
+			// 插入数据到数据库
+			_, err = db.Exec("INSERT INTO opcdata (tag_id, data_timestamp, data_quality, value) VALUES (?,?,?,?)",
+				pubData.TagID, pubData.Timestamp, pubData.Quality, pubData.Value)
+			if err != nil {
+				log.Printf("failed to insert data into database: %v", err)
+			}
 		}
 	}
 }
@@ -246,13 +284,13 @@ func main() {
 	var wg sync.WaitGroup
 
 	// 加载配置文件
-	err := loadConfig("E:\\Go_Codes\\data_pullandpush_go\\opcda2mq\\config.toml")
+	err := loadConfig("E:\\Go_Codes\\data_pullandpush_go\\opcda2mysql\\config.toml")
 	if err != nil {
 		log.Fatalf("failed to load config: %v", err)
 	}
 
 	// 读取 tags 从 CSV 文件
-	tags, err := readTagsFromCSV("E:\\Go_Codes\\data_pullandpush_go\\opcda2mq\\opcdatags.csv")
+	tags, err := readTagsFromCSV("E:\\Go_Codes\\data_pullandpush_go\\opcda2mysql\\opcdatags.csv")
 	if err != nil {
 		log.Fatalf("failed to read tags from CSV: %v", err)
 	}
@@ -262,19 +300,11 @@ func main() {
 		defer wg.Done()
 		readOPCDAData(config, tags)
 	}()
-	//numThreads := 2 // 你可以根据需要调整线程数量
-	//for i := 0; i < numThreads; i++ {
-	//	wg.Add(1)
-	//	go func() {
-	//		defer wg.Done()
-	//		readOPCDAData()
-	//	}()
-	//}
 
-	// 启动MQTT发布线程
+	// 启动MySQL数据写入线程
 	go func() {
 		defer wg.Done()
-		publishMQTTData(config)
+		writeMySQLData(config)
 	}()
 
 	// 等待子线程启动

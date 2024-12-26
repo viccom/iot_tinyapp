@@ -1,0 +1,13 @@
+[opcda]
+host = "localhost"
+progID = "Matrikon.OPC.Simulation.1"
+
+[mysql]
+host = "192.168.0.48"
+port = 3306
+id = "iot"
+username = "root"
+password = "Pa88word"
+
+[reconnect]
+delay = "5s"

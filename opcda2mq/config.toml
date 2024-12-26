@@ -1,0 +1,14 @@
+[opcda]
+host = "localhost"
+progID = "Matrikon.OPC.Simulation.1"
+
+[mqtt]
+broker = "mqbroker.metme.top"
+port = 1883
+id = "mqttgo_client_id"
+username = "mqdevice"
+password = "device@metme"
+topic = "7486E23133A9/Matrikon.OPC.Simulation.1"
+
+[reconnect]
+delay = "5s"
