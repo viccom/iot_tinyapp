@@ -12,6 +12,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/BurntSushi/toml"
 	_ "github.com/go-sql-driver/mysql"
@@ -38,6 +39,21 @@ type Config struct {
 }
 
 var config Config
+
+func trimInvisible(s string) string {
+	start := 0
+	for start < len(s) && unicode.IsSpace(rune(s[start])) {
+		start++
+	}
+	end := len(s) - 1
+	for end >= 0 && unicode.IsSpace(rune(s[end])) {
+		end--
+	}
+	if end < start {
+		return ""
+	}
+	return s[start : end+1]
+}
 
 // 从配置文件中读取
 func loadConfig(configFile string) error {
@@ -139,15 +155,16 @@ func readOPCDAData(config Config, tags []string) {
 				for i := 0; i < len(data.ItemClientHandles); i++ {
 					tag := ""
 					for _, item := range itemList {
+						//fmt.Printf("%d, %d, %s\n", data.ItemClientHandles[i], item.GetClientHandle(), item.GetItemID())
 						if item.GetClientHandle() == data.ItemClientHandles[i] {
-							tag = item.GetItemID()
+							tag = trimInvisible(item.GetItemID())
 						}
 					}
 					// 将 data.Values[i] 转换为字符串
 					valueStr := fmt.Sprintf("%v", data.Values[i])
 					timestampstr := data.TimeStamps[i].Format("2006-01-02 15:04:05")
 					quality := uint8(data.Qualities[i])
-					//fmt.Printf("json data : %s %s %d %s \n", tag, timestampstr, quality, valueStr)
+					//fmt.Printf("json data:: %s, %s, %d, %s \n", item.GetItemID(), timestampstr, quality, valueStr)
 					opcdaData := PUBData{
 						TagID:     tag,
 						Timestamp: timestampstr,
@@ -160,7 +177,7 @@ func readOPCDAData(config Config, tags []string) {
 					}
 
 					dataQueue.Enqueue(string(jsonData))
-					fmt.Printf("item %s\ttimestamp: %s\tquality: %d\tvalue: %v\n", tag, data.TimeStamps[i], data.Qualities[i], data.Values[i])
+					fmt.Printf("item: %s, timestamp: %s, quality: %d, value: %v\n", tag, data.TimeStamps[i], data.Qualities[i], data.Values[i])
 				}
 
 			}
@@ -184,41 +201,14 @@ func readOPCDAData(config Config, tags []string) {
 
 }
 
-// 初始化数据库连接
-//func initDB(config Config) (*sql.DB, error) {
-//	fmt.Printf("username: %s, Password: %s, Host: %s, port: %d, id:%s\n", config.Mysql.Username, config.Mysql.Password, config.Mysql.Host, config.Mysql.Port, config.Mysql.ID)
-//	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s", config.Mysql.Username, config.Mysql.Password, config.Mysql.Host, config.Mysql.Port, config.Mysql.ID)
-//	db, err := sql.Open("mysql", dsn)
-//	if err != nil {
-//		return nil, errors.Wrap(err, "failed to open database")
-//	}
-//	return db, nil
-//}
-
-// 创建数据库和表
-//func createDatabaseAndTable(db *sql.DB) error {
-//	_, err := db.Exec("CREATE DATABASE IF NOT EXISTS opcda")
-//	if err != nil {
-//		return errors.Wrap(err, "failed to create database")
-//	}
-//	_, err = db.Exec("USE opcda")
-//	if err != nil {
-//		return errors.Wrap(err, "failed to use database")
-//	}
-//	_, err = db.Exec("CREATE TABLE IF NOT EXISTS data (id INT AUTO_INCREMENT PRIMARY KEY, tag_id VARCHAR(255), timestamp DATETIME, quality INT, value VARCHAR(255))")
-//	if err != nil {
-//		return errors.Wrap(err, "failed to create table")
-//	}
-//	return nil
-//}
-
 // 从队列读取数据写入MySQL的函数
 func writeMySQLData(config Config) {
 	// 连接数据库
-	fmt.Printf("username: %s, Password: %s, Host: %s, port: %d, id:%s\n", config.Mysql.Username, config.Mysql.Password, config.Mysql.Host, config.Mysql.Port, config.Mysql.ID)
-	db, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s:%d)/", config.Mysql.Username, config.Mysql.Password, config.Mysql.Host, config.Mysql.Port))
+	fmt.Printf("%s:%s@tcp(%s:%d)/\n", config.Mysql.Username, config.Mysql.Password, config.Mysql.Host, config.Mysql.Port)
+	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/", config.Mysql.Username, config.Mysql.Password, config.Mysql.Host, config.Mysql.Port)
+	db, err := sql.Open("mysql", dsn)
 	if err != nil {
-		log.Printf("failed to connect to database: %v", err)
+		fmt.Printf("failed to connect to database: %v", err)
 		return
 	}
 	defer db.Close()
@@ -226,7 +216,7 @@ func writeMySQLData(config Config) {
 	// 创建数据库
 	_, err = db.Exec(fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s", config.Mysql.ID))
 	if err != nil {
-		log.Printf("failed to create database: %v", err)
+		fmt.Printf("failed to create database: %v", err)
 		return
 	}
 
@@ -242,7 +232,7 @@ func writeMySQLData(config Config) {
         id INT AUTO_INCREMENT PRIMARY KEY,
         tag_id VARCHAR(255) NOT NULL,
         data_timestamp DATETIME NOT NULL,
-        data_quality TINYINT NOT NULL,
+        data_quality INT NOT NULL,
         value VARCHAR(255) NOT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )`)
@@ -275,6 +265,8 @@ func writeMySQLData(config Config) {
 				pubData.TagID, pubData.Timestamp, pubData.Quality, pubData.Value)
 			if err != nil {
 				log.Printf("failed to insert data into database: %v", err)
+			} else {
+				fmt.Printf("Tagid %s data inserted  into table opcdata successfully\n", pubData.TagID)
 			}
 		}
 	}
@@ -284,13 +276,13 @@ func main() {
 	var wg sync.WaitGroup
 
 	// 加载配置文件
-	err := loadConfig("E:\\Go_Codes\\data_pullandpush_go\\opcda2mysql\\config.toml")
+	err := loadConfig("config.toml")
 	if err != nil {
 		log.Fatalf("failed to load config: %v", err)
 	}
 
 	// 读取 tags 从 CSV 文件
-	tags, err := readTagsFromCSV("E:\\Go_Codes\\data_pullandpush_go\\opcda2mysql\\opcdatags.csv")
+	tags, err := readTagsFromCSV("opcdatags.csv")
 	if err != nil {
 		log.Fatalf("failed to read tags from CSV: %v", err)
 	}

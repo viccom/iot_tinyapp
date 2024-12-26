@@ -3,7 +3,7 @@ host = "localhost"
 progID = "Matrikon.OPC.Simulation.1"
 
 [mysql]
-host = "192.168.0.48"
+host = "localhost"
 port = 3306
 id = "iot"
 username = "root"

@@ -12,6 +12,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/BurntSushi/toml"
 	"github.com/huskar-t/opcda"
@@ -62,6 +63,21 @@ func readTagsFromCSV(filePath string) ([]string, error) {
 	}
 
 	return tags, nil
+}
+
+func trimInvisible(s string) string {
+	start := 0
+	for start < len(s) && unicode.IsSpace(rune(s[start])) {
+		start++
+	}
+	end := len(s) - 1
+	for end >= 0 && unicode.IsSpace(rune(s[end])) {
+		end--
+	}
+	if end < start {
+		return ""
+	}
+	return s[start : end+1]
 }
 
 // 从配置文件中读取
@@ -130,7 +146,7 @@ func readOPCDAData(config Config, tags []string) {
 	}
 	// Wait for the OPC server to be ready
 	time.Sleep(time.Second * 2)
-	ch := make(chan *opcda.DataChangeCallBackData, 100)
+	ch := make(chan *opcda.DataChangeCallBackData, 1000)
 	go func() {
 		for {
 			select {
@@ -141,7 +157,7 @@ func readOPCDAData(config Config, tags []string) {
 					tag := ""
 					for _, item := range itemList {
 						if item.GetClientHandle() == data.ItemClientHandles[i] {
-							tag = item.GetItemID()
+							tag = trimInvisible(item.GetItemID())
 						}
 					}
 					// 将 data.Values[i] 转换为字符串
@@ -229,7 +245,7 @@ func publishMQTTData(config Config) {
 			}
 
 			if data, ok := dataQueue.Dequeue(); ok {
-				fmt.Printf("Publishing data to MQTT: %s\n", data)
+				//fmt.Printf("Publishing data to MQTT: %s\n", data)
 				token := client.Publish(config.Mqtt.Topic, 0, false, data)
 				if token.Wait() && token.Error() != nil {
 					log.Printf("Error publishing to MQTT: %v\n", token.Error())
@@ -237,7 +253,7 @@ func publishMQTTData(config Config) {
 					fmt.Printf("Successfully published data to MQTT: %s\n", data)
 				}
 			}
-			time.Sleep(1 * time.Second)
+			//time.Sleep(1 * time.Second)
 		}
 	}
 }
@@ -246,13 +262,13 @@ func main() {
 	var wg sync.WaitGroup
 
 	// 加载配置文件
-	err := loadConfig("E:\\Go_Codes\\data_pullandpush_go\\opcda2mq\\config.toml")
+	err := loadConfig("config.toml")
 	if err != nil {
 		log.Fatalf("failed to load config: %v", err)
 	}
 
 	// 读取 tags 从 CSV 文件
-	tags, err := readTagsFromCSV("E:\\Go_Codes\\data_pullandpush_go\\opcda2mq\\opcdatags.csv")
+	tags, err := readTagsFromCSV("opcdatags.csv")
 	if err != nil {
 		log.Fatalf("failed to read tags from CSV: %v", err)
 	}
