@@ -287,7 +287,7 @@ func main() {
 		log.Fatalf("failed to read tags from CSV: %v", err)
 	}
 
-	// 启动多个 readOPCDAData 线程
+	// 启动 readOPCDAData 线程
 	go func() {
 		defer wg.Done()
 		readOPCDAData(config, tags)
